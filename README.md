@@ -1,6 +1,6 @@
 # Kilasy
 
-Kilasy is a programming exercise platform. Teachers publish exercises with a deadline, students submit their code or a link to their GitHub repository, and teachers then grade them. Students receive their grade by email.
+Kilasy is a programming exercise platform. Teachers publish exercises with a deadline and/or a duration, students submit their code or a link to their GitHub repository, and teachers then grade them. Students receive their grade by email.
 
 Production version: 1.3.0.
 
@@ -35,6 +35,7 @@ The API responds on http://localhost:8080.
 | GET | `/exercises` | List exercises |
 | GET | `/exercises/{id}` | Exercise details |
 | POST | `/exercises` | Create an exercise (teacher) |
+| POST | `/exercises/{id}/start` | Open a timed exercise: starts the student's countdown (student) |
 | POST | `/exercises/{id}/submissions` | Submit an exercise (student) |
 | GET | `/submissions/{id}` | Submission details |
 | PUT | `/submissions/{id}/grade` | Grade a submission (teacher) |
@@ -52,6 +53,18 @@ Create an exercise:
 curl -X POST http://localhost:8080/exercises \
   -H "Content-Type: application/json" \
   -d '{"title": "Recherche dichotomique", "maxPoints": 20, "deadline": "2027-03-01", "teacherId": 1}'
+```
+
+Create a timed exercise (30 minutes, no deadline), then open it as a student:
+
+```bash
+curl -X POST http://localhost:8080/exercises \
+  -H "Content-Type: application/json" \
+  -d '{"title": "QCM complexité", "durationMinutes": 30, "teacherId": 1}'
+
+curl -X POST http://localhost:8080/exercises/6/start \
+  -H "Content-Type: application/json" \
+  -d '{"studentId": 1}'
 ```
 
 Submit an exercise:
@@ -82,4 +95,6 @@ curl http://localhost:8080/exports/grades.csv
 - A submission contains code, a link to a GitHub repository, or both.
 - A student can only submit once per exercise.
 - A submission sent after the deadline day is marked as late.
+- An exercise has a deadline, a duration in minutes, or both.
+- Timed exercise: the countdown starts when the student calls `/start`. Calling it again does not restart the countdown. A submission without `/start`, or after the duration has elapsed, is refused (HTTP 422). The transcript shows the time used.
 - Points are entered on the exercise's scale (10, 20, 40…) and converted to a grade out of 20.

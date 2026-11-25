@@ -297,3 +297,178 @@ Le `try/catch` est dans `grade()` et pas dans `SmsSender` : le fournisseur signa
 - L'**email** a exactement le problème que le `try/catch` règle pour le SMS : si l'envoi de l'email échoue, la correction renvoie une 500 alors que la note est enregistrée, et en plus le SMS ne part pas.
 - Pas de transaction : la note est enregistrée avant les notifications, et rien ne garantit la cohérence si une étape échoue.
 - Les logs passent par `System.out` / `System.err` au lieu d'un logger. Dans la console Windows, les accents s'affichent mal.
+
+---
+---
+
+# Journal IA — C3 : exercices minutés
+
+Outil utilisé : Claude Code (Claude Opus 5.5).
+
+---
+
+## Échange 1 — Analyse de la demande avant de coder
+
+**Demande** : analyser la consigne C3 avec l'IA avant toute modification.
+
+**Proposition** : l'IA a relevé que :
+- il faut **deux nouvelles données** : la durée de l'exercice (colonne `duration_minutes`) et l'heure à laquelle chaque étudiant ouvre l'exercice. Cette heure ne peut pas aller dans `submission`, parce que la soumission n'existe pas encore au moment de l'ouverture. Il faut donc une table `exercise_start` ;
+- le vrai piège est « **en plus ou à la place** de son échéance » : `deadline` est `NOT NULL`, et **tout le code suppose qu'elle existe**. Une échéance vide ferait planter (NullPointerException) `ExerciseController` (liste, détail, création), `SubmissionController` (soumission, consultation, correction), `GradeReport` et `CsvExport` ;
+- la pénalité de retard est **recopiée dans 4 fichiers** depuis C1 : le cas « pas d'échéance » devra donc être ajouté 4 fois ;
+- les cas limites de `start` : deuxième appel, exercice non minuté, exercice déjà soumis, soumission sans `start` ;
+- un risque de décalage horaire de 3 h entre Postgres (UTC) et Java (UTC+3) si `started_at` prenait la valeur `DEFAULT now()` de la base. **Cette affirmation était fausse** (voir échange 3).
+
+**Décision** : analyse acceptée, sauf le point sur le fuseau horaire, que j'ai fait vérifier.
+
+**Pourquoi** : comme en C1, la difficulté n'est pas la nouvelle fonctionnalité, mais tout le code existant qui suppose qu'une échéance existe toujours.
+
+**Vérification** : lecture de tous les fichiers Java, de `schema.sql`, `data.sql` et `compose.yaml`.
+
+---
+
+## Échange 2 — Choix de conception
+
+**Demande** : trancher les cas limites avant de coder.
+
+**Proposition et décision** : j'ai validé les 8 propositions de l'IA :
+1. **Deuxième appel à `start`** : le décompte n'est pas relancé, on renvoie l'heure de départ déjà enregistrée (HTTP 200 au lieu de 201).
+2. **Soumission sans `start`** sur un exercice minuté : refusée (422).
+3. **`start` sur un exercice sans durée** : refusé (422, « cet exercice n'est pas minuté »).
+4. **Échéance seule, durée seule, ou les deux** sont autorisées, mais il en faut au moins une. C'est vérifié dans `create()` et par une contrainte `CHECK` dans `schema.sql`.
+5. **Pas de marge de tolérance** : la soumission doit arriver avant la fin de la durée.
+6. **Ouvrir l'exercice après l'échéance** est autorisé, et la pénalité de retard s'applique normalement (critère 4).
+7. **Relevé, exercice ouvert mais pas soumis** : statut `NON RENDU` si la durée est écoulée, sinon `EN COURS`.
+8. **Aucun nouveau fichier Java** : seulement des ajouts dans les fichiers existants, plus le nouveau endpoint `start` dans `ExerciseController`.
+
+**Pourquoi** :
+- (1) Si `start` relançait le décompte, un étudiant pourrait avoir un temps illimité.
+- (2) Sans heure de départ, impossible de vérifier la durée.
+- (4) La contrainte `CHECK` protège la règle même si on insère des données sans passer par l'API.
+- (5) C'est une question à poser au client : avec la latence du réseau, une soumission envoyée à la dernière seconde peut être refusée.
+
+**Vérification** : voir l'échange 6.
+
+---
+
+## Échange 3 — L'IA s'était trompée sur le fuseau horaire
+
+**Demande** : vérifier l'affirmation de l'échange 1, avant de l'utiliser comme argument.
+
+**Proposition** : l'IA a créé un exercice via `POST /exercises`, puis a comparé sa colonne `created_at` (remplie par le `now()` de Postgres, appelé **depuis l'appli**) avec le `now()` lancé dans `psql` et avec l'horloge du PC.
+
+**Résultat** :
+- `created_at` (depuis l'appli) : `07:47:14`, comme l'horloge du PC ;
+- `now()` dans `psql` : `04:47:14+00` (UTC).
+
+Le driver JDBC règle le fuseau horaire de la session sur celui de la JVM. Le `now()` de la base est donc à l'heure locale quand il est appelé par l'appli. **Il n'y avait pas de décalage de 3 h.**
+
+**Décision** : je garde quand même `started_at` et `submitted_at` **tous les deux pris côté Java** (`LocalDateTime.now()`), sans `DEFAULT now()` dans la table `exercise_start`.
+
+**Pourquoi** : la raison n'est plus le décalage, mais le fait d'avoir **une seule horloge**. Les deux heures que l'on compare viennent de la même source.
+
+**Vérification** : la requête et les deux valeurs ci-dessus.
+
+---
+
+## Échange 4 — Trois points complémentaires
+
+**Demande** : l'IA m'a signalé trois points qui n'étaient pas encore tranchés.
+
+**Proposition et décision** :
+- **`start` sur un exercice déjà soumis** : **409** « Cet étudiant a déjà soumis cet exercice », le même code que pour une double soumission.
+- **`durationMinutes` dans le JSON des exercices** : le champ est **visible**, même à `null` pour les anciens exercices. C'est un ajout : un client existant ne casse pas.
+- **CSV, exercice sans échéance** : la colonne `echeance` est **vide**. Je n'ajoute pas de colonne « temps utilisé », car le client ne la demande que dans le relevé.
+
+**Pourquoi** : rester cohérent avec l'existant et ne pas faire plus que la demande.
+
+**Vérification** : voir l'échange 6.
+
+---
+
+## Échange 5 — Implémentation
+
+**Proposition** :
+- **`schema.sql`** : `deadline` devient facultatif. Ajout de `duration_minutes INTEGER CHECK (> 0)`, d'une contrainte « échéance ou durée », et de la table `exercise_start (exercise_id, student_id, started_at, UNIQUE(exercise_id, student_id))`.
+- **`Exercise.java`** : champ `durationMinutes`.
+- **`ExerciseController.java`** :
+  - la liste et le détail acceptent une échéance vide ;
+  - `create()` accepte `durationMinutes`. Il doit être un nombre entier positif, sinon la réponse est 400 au lieu d'une erreur 500 ;
+  - nouveau `POST /exercises/{id}/start`, avec `INSERT … ON CONFLICT DO NOTHING`. Si deux appels arrivent en même temps, la base garde la première heure au lieu de planter.
+- **`SubmissionController.java`** : dans `submit()`, refus en 422 sans `start` ou après la fin de la durée. Dans `submit()`, `get()` et `grade()`, une échéance vide veut dire « jamais en retard ».
+- **`GradeReport.java`** : jointure sur `exercise_start`, statut `EN COURS` et `timeUsed` (temps entre l'ouverture et la soumission). Les clés `durationMinutes`, `startedAt` et `timeUsed` ne sont ajoutées **que pour les exercices minutés**, pour que les lignes des autres exercices ne changent pas.
+- **`CsvExport.java`** : pas de pénalité et colonne `echeance` vide quand il n'y a pas d'échéance.
+
+**Décision** : gardé.
+
+**Pourquoi** : ce sont les changements minimaux pour respecter les 5 critères sans réorganiser le code.
+
+**Vérification** : `mvn compile` OK, puis l'échange 6.
+
+---
+
+## Échange 6 — Vérification (curl + psql)
+
+Base remise à zéro avant les tests avec `docker compose down` puis `docker compose up -d`, parce que les scripts SQL ne modifient pas une table qui existe déjà.
+
+**Critère 3 — exercices sans durée inchangés** : **avant** de modifier le code, l'IA a enregistré les réponses de 25 requêtes GET : `/exercises`, `/exercises/1..5`, `/submissions/1..12`, `/students/1..6/transcript` et `/exports/grades.csv`. Elle a refait la même capture **après** les modifications et comparé les deux.
+- Relevés, soumissions et CSV : **identiques octet pour octet**.
+- Exercices : seule différence, le champ ajouté `"durationMinutes": null`. ✅
+
+**Critère 1 — durée en plus ou à la place de l'échéance** :
+- `{"title":"QCM minute","durationMinutes":30}` (durée seule) : 201, `"deadline":null`
+- `{"title":"Partiel minute","durationMinutes":60,"deadline":"2027-01-01"}` (les deux) : 201
+- `{"title":"Classique","deadline":"2027-01-01"}` (comme avant) : 201
+- Ni échéance ni durée : 400. Durée `"abc"`, `0` ou `2.5` : 400.
+- Insertion directe en base sans échéance ni durée : refusée par la contrainte `exercise_check`. ✅
+
+**`start`** :
+- Exercice non minuté : 422. Exercice ou étudiant introuvable : 404. Sans `studentId` : 400.
+- Premier appel : 201. Deuxième appel deux secondes plus tard : 200 avec **le même `startedAt`**.
+- Après soumission : 409. ✅
+
+**Critère 2 — soumission après la fin de la durée** :
+- Soumission sans `start` : **422** « Exercice minuté : il faut d'abord l'ouvrir (POST /exercises/6/start) avant de soumettre ».
+- Pour ne pas attendre 30 minutes, l'heure de départ de Bob a été reculée de 31 minutes avec `psql` (`UPDATE exercise_start SET started_at = started_at - INTERVAL '31 minutes' …`). Sa soumission donne **422** « Temps écoulé : la durée de 30 minute(s) s'est terminée le …, la soumission est refusée ». ✅
+
+**Critère 4 — pénalité de retard sur un exercice minuté avec échéance** : l'API refuse une échéance passée, donc l'échéance de « Partiel minute » a été mise à J-2 avec `psql`. Clara a ouvert l'exercice et soumis 12 minutes plus tard, donc dans la durée de 60 minutes.
+- Soumission acceptée : `"late":true`.
+- Correction à 20/20 : `"penaltyPercent":20`, `"grade":16.0`. ✅
+
+**Critère 5 — temps utilisé dans le relevé** :
+- Clara : `"timeUsed":"12 min 5 s"`, `"status":"CORRIGÉ"`, `"grade":16.0`.
+- David (exercice ouvert, pas soumis) : `"status":"EN COURS"`.
+- Emma (exercice ouvert il y a 40 minutes, pas soumis) : `"status":"NON RENDU"`.
+- Clara n'a pas ouvert « QCM minute » : `"status":"À RENDRE"`, `"startedAt":null`. ✅
+
+**Autres vérifications** : `GET /submissions/13` et la correction d'un exercice sans échéance fonctionnent (pénalité 0). Dans le CSV, la ligne de cet exercice a une colonne `echeance` vide.
+
+---
+
+## Bilan
+
+**Fichiers modifiés** :
+- `src/main/resources/schema.sql` : échéance facultative, colonne `duration_minutes`, contrainte « échéance ou durée », table `exercise_start`.
+- `src/main/java/hei/school/Exercise.java` : champ `durationMinutes`.
+- `src/main/java/hei/school/ExerciseController.java` : lecture avec une échéance vide, création avec une durée, nouveau `POST /exercises/{id}/start`.
+- `src/main/java/hei/school/SubmissionController.java` : refus en 422 dans `submit()`, échéance vide dans `submit()`, `get()` et `grade()`.
+- `src/main/java/hei/school/GradeReport.java` : temps utilisé, statut `EN COURS`, échéance vide.
+- `src/main/java/hei/school/CsvExport.java` : échéance vide.
+- `README.md` : endpoint `POST /exercises/{id}/start` dans le tableau de l'API, exemple d'exercice minuté, règles métier (échéance et/ou durée, refus en 422).
+- `JOURNAL-IA.md` : cette section.
+
+**Ce que l'IA a proposé et que je n'ai pas gardé** :
+- l'argument du décalage horaire de 3 h, qui était faux (échange 3) ;
+- une colonne « temps utilisé » dans le CSV.
+
+**Ce que je retiens** :
+- Une phrase de la consigne (« ou à la place de son échéance ») a touché **6 fichiers**, parce que tout le code supposait que l'échéance existait toujours.
+- La pénalité de retard recopiée en C1 a dû recevoir le même correctif **4 fois**. C'est le coût concret de la duplication.
+- Il faut vérifier les affirmations techniques de l'IA : son explication sur le fuseau horaire était convaincante, mais fausse.
+- Sans tests automatiques, la capture avant/après des réponses de l'API m'a permis de prouver le critère 3 au lieu de le supposer.
+
+**Mauvaises pratiques repérées, hors périmètre, non corrigées** :
+- **N'importe qui peut lancer le chrono d'un autre étudiant** : sans authentification, un étudiant peut appeler `start` avec le `studentId` d'un camarade et lui faire perdre son temps. C3 rend ce manque d'authentification plus grave.
+- `start` recopie le code de `submit()` qui cherche l'exercice et l'étudiant. Comme dans `submit()`, un `studentId` envoyé en texte provoque une erreur 500 au lieu d'une 400.
+- Toujours `SELECT max(id)` après un `INSERT`, et un risque d'erreur 500 si deux soumissions du même étudiant arrivent en même temps (le contrôle « déjà soumis » se fait avant l'insertion).
+- `timeUsed` n'apparaît que pour un exercice soumis. Pour un exercice ouvert mais pas rendu, le relevé montre seulement `startedAt` et le statut.
+- Le message d'erreur de `create()` sans échéance a changé : c'est une petite différence, même pour les exercices non minutés.
