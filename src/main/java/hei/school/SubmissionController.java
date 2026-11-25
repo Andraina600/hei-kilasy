@@ -9,6 +9,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiConsumer;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
@@ -32,7 +33,7 @@ public class SubmissionController {
     private JavaMailSender mailSender;
 
     @Autowired
-    private SmsSender smsSender;
+    private BiConsumer<String, String> smsSender; // (phone, text), declared in KilasyApplication
 
     @PostMapping("/exercises/{id}/submissions")
     public ResponseEntity<?> submit(@PathVariable long id, @RequestBody Map<String, Object> body) {
@@ -182,7 +183,7 @@ public class SubmissionController {
             System.out.println("Pas de numéro de téléphone pour " + fullName + " : SMS non envoyé");
         } else {
             try {
-                smsSender.send(phone, "Votre note pour « " + title + " » est disponible : " + grade + "/20.");
+                smsSender.accept(phone, "Votre note pour « " + title + " » est disponible : " + grade + "/20.");
             } catch (Exception e) {
                 System.err.println("Échec de l'envoi du SMS à " + phone + " : " + e.getMessage());
             }

@@ -243,25 +243,53 @@ Le `try/catch` est dans `grade()` et pas dans `SmsSender` : le fournisseur signa
 - `GET /submissions/2` : `"grade":12.6`. La note était **quand même enregistrée**, mais l'enseignant aurait cru que la correction avait échoué.
 - Conclusion : le `try/catch` est bien ce qui fait respecter le critère 2.
 
-**Critère 3** : vérifié par lecture. `grade()` ne fait qu'appeler `smsSender.send(...)` : le détail de l'envoi n'est que dans `SmsSender.java`.
+**Critère 3** : vérifié par lecture. `grade()` ne fait qu'appeler le fournisseur SMS : le détail de l'envoi est à un seul endroit (d'abord `SmsSender.java`, puis le `@Bean` de `KilasyApplication.java` après la révision de l'échange 6).
 
 **Remise en état** : `throw` retiré, `try/catch` remis, appli redémarrée et note de Bob remise à 16 points avec le commentaire « Bon travail. ». L'IA a vérifié avec `git diff` et `GET /submissions/2` (14.4).
+
+---
+
+## Échange 6 — Révision : plus de nouveau fichier (fait au début de C3)
+
+**Demande** : en relisant C2, j'ai décidé de ne plus créer de fichier, pour respecter la règle du module. L'envoi du SMS doit être déclaré dans `KilasyApplication.java` avec un `@Bean`.
+
+**Proposition** : un `@Bean` doit retourner un type. L'IA a proposé deux options :
+- **un `BiConsumer<String, String>` du JDK** (recommandé par l'IA) : le bean est une lambda `(phone, text) -> ...`. Aucune nouvelle classe n'est écrite, puisque `BiConsumer` est une interface fournie par Java ;
+- **une classe `static` imbriquée `SmsSender`** dans `KilasyApplication`, plus une méthode `@Bean smsSender()` : pas de nouveau fichier, mais quand même une nouvelle classe.
+
+**Décision** : **le `BiConsumer`**. Concrètement :
+- `SmsSender.java` est supprimé ;
+- `KilasyApplication` déclare le bean `smsSender()`, qui écrit le SMS dans les logs ;
+- dans `SubmissionController`, le champ devient `BiConsumer<String, String> smsSender` et l'appel devient `smsSender.accept(phone, texte)`.
+
+**Pourquoi** :
+- C'est la seule option qui respecte la règle du module à la lettre : ni nouveau fichier ni nouvelle classe.
+- Le critère 3 reste respecté : pour changer de fournisseur, on modifie seulement le `@Bean`, pas `grade()`.
+- Limite connue : `accept(phone, text)` est moins parlant que `send(phone, text)`, et rien n'empêche d'inverser les deux `String`. J'ai mis un commentaire `(phone, text)` sur le bean et sur le champ pour compenser.
+- Le `try/catch` reste dans `grade()` : c'est toujours la notation qui décide que la note reste publiée si le SMS échoue.
+
+**Vérification** (après redémarrage de l'appli) :
+- `mvn clean compile` OK.
+- **Test 1 refait** : `PUT /submissions/2/grade {"points": 16, "feedback": "Bon travail."}` donne HTTP 200 et `"grade":14.4`. Dans les logs : `Email de note envoyé à bob@etu.kilasy.test`, puis `[SMS] +261 34 00 000 02 : Votre note pour « Tri à bulles » est disponible : 14.4/20.` ✅
+- **Test 2 refait** : la lambda a été remplacée temporairement par `(phone, text) -> { throw new RuntimeException("fournisseur SMS indisponible"); }`, puis `PUT {"points": 12}`. Résultat : HTTP 200, `GET /submissions/2` donne `"grade":10.8`, l'email part, et les logs affichent `Échec de l'envoi du SMS à +261 34 00 000 02 : fournisseur SMS indisponible`. ✅
+- Remise en état : lambda d'origine remise, puis `mvn clean compile` OK.
 
 ---
 
 ## Bilan
 
 **Fichiers modifiés** :
-- `src/main/java/hei/school/SmsSender.java` (**nouveau**) : fournisseur SMS simulé, qui écrit le SMS dans les logs.
-- `src/main/java/hei/school/SubmissionController.java` : injection de `SmsSender` et envoi du SMS après l'email dans `grade()`, avec un `try/catch` et le cas « pas de numéro ».
+- `src/main/java/hei/school/KilasyApplication.java` : `@Bean smsSender()`, un `BiConsumer<String, String>` (fournisseur SMS simulé, qui écrit le SMS dans les logs). Au départ, l'envoi était dans un nouveau fichier `SmsSender.java`, supprimé à l'échange 6.
+- `src/main/java/hei/school/SubmissionController.java` : injection du fournisseur SMS et envoi du SMS après l'email dans `grade()`, avec un `try/catch` et le cas « pas de numéro ».
 - `JOURNAL-IA.md` : cette section.
 
 **Ce que l'IA a proposé et que je n'ai pas gardé** :
 - l'interface + l'implémentation en deux fichiers (option A) ;
-- la virgule dans le SMS (proposition non demandée par le client).
+- la virgule dans le SMS (proposition non demandée par le client) ;
+- la classe imbriquée `SmsSender` dans `KilasyApplication` (échange 6).
 
 **Ce que je retiens** :
-- Le critère 3 m'a obligé à **créer une structure** (un nouveau fichier) que le code n'avait pas. Dans un code où tout est dans le contrôleur, chaque nouvelle demande de flexibilité oblige à extraire quelque chose.
+- Le critère 3 m'a obligé à **créer une structure** que le code n'avait pas. Je l'ai d'abord fait avec un nouveau fichier, puis avec un `BiConsumer` pour respecter la règle. Le code est un peu moins lisible : sans pouvoir créer de classe, on est obligé de détourner un type générique. Dans un code où tout est dans le contrôleur, chaque nouvelle demande de flexibilité oblige à extraire quelque chose.
 - Le critère 2 n'était respecté que grâce au `try/catch`. Sans lui, la note était enregistrée **et** l'enseignant recevait une erreur : l'état réel et la réponse ne correspondaient plus.
 - Après chaque modification du code, il faut redémarrer l'appli avant de tester.
 
